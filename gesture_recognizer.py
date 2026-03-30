@@ -5,6 +5,8 @@ from typing import Any
 import cv2
 import mediapipe as mp
 import numpy as np
+import pytest
+from matplotlib import pyplot as plt
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -80,59 +82,55 @@ class RobotCmd(ABC):
 
 class Move(RobotCmd):
 
-    _deltas: list[int]
+    _vr: float
+    _vl: float
 
-    def __init__(self, mnmnx, status, axis='z', rotation=0, translation=None):
+    def __init__(self, mnmnx, status, vr=0.0, vl=0.0):
         super().__init__(mnmnx, status)
-        self._axis = axis
-        self._rotation = rotation
-        if translation is None:
-            translation = np.array([0.0, 0.0, 0.0])
-        self._translation = translation
+        self._vr = vr
+        self._vl = vl
 
     @property
-    def axis(self):
-        return self._axis
+    def vr(self):
+        return self._vr
 
-    @axis.setter
-    def axis(self, new_axis):
-        self._axis = new_axis
-
-    @property
-    def rotation(self):
-        return self._rotation
-
-    @rotation.setter
-    def rotation(self, new_rotation):
-        self._rotation = new_rotation
+    @vr.setter
+    def vr(self, new_vr):
+        self.vr = new_vr
 
     @property
-    def translation(self):
-        return self._translation
+    def vl(self):
+        return self._vl
 
-    @translation.setter
-    def translation(self, new_translation):
-        self._translation = new_translation
+    @vl.setter
+    def vl(self, new_vl):
+        self.vl = new_vl
 
-    @property
-    def tf(self):
-        rotation = R.from_euler(self.axis, self.rotation, degrees=True)
-        return Tf.from_components(self.translation, rotation)
+    def compute_velocities(self, b, r):
+        v = r / 2 * (self.vr + self.vl)
+        omega = r / b * (self.vr - self.vl)
+        return  v, omega
+
+    def update_pose(self, pose, b, r, dt=1/30):
+        v, omega = self.compute_velocities(b, r)
+        x, y, theta = pose
+        theta += omega * dt
+        x += v * np.cos(theta) * dt
+        y += v * np.sin(theta) * dt
+        return np.array([x, y, theta])
 
     def execute(self, robot):
         robot.status = self.status
-        self.rotation += robot.rotation
         print(f"robot status changed to: {robot.status.value}")
-        robot.rotation = self.rotation
-        print(f"robot rotation changed to: {robot.rotation}")
-        robot.position = self.tf.apply(robot.position)
-        print(f"robot position changed to: {robot.position}")
+        robot.pose = self.update_pose(robot.pose, robot.b, robot.r)
+        print(f"robot pose changed to: {robot.pose}")
+        robot.add_to_trajectory(robot.pose)
 
 
 class TurnLeft(Move):
 
-    def __init__(self, rotation=1):
-        super().__init__(CGesturesE.L, RStatusesE.TURN_LEFT, axis = 'z', rotation=rotation)
+    def __init__(self, vr=0.2, vl=0.1):
+        super().__init__(CGesturesE.L, RStatusesE.TURN_LEFT, vr, vl)
 
     def execute(self, robot):
         super().execute(robot)
@@ -140,8 +138,8 @@ class TurnLeft(Move):
 
 class TurnRight(Move):
 
-    def __init__(self, rotation=1):
-        super().__init__(CGesturesE.L, RStatusesE.TURN_RIGHT, axis = 'z', rotation=-rotation)
+    def __init__(self, vr=0.1, vl=0.2):
+        super().__init__(CGesturesE.R, RStatusesE.TURN_RIGHT, vr, vl)
 
     def execute(self, robot):
         super().execute(robot)
@@ -149,25 +147,50 @@ class TurnRight(Move):
 
 class MoveForward(Move):
 
-    def __init__(self, distance):
-        super().__init__(CGesturesE.F, RStatusesE.MOVE_FORWARD, translation=[distance, 0, 0])
+    def __init__(self, vr=0.2, vl=0.2):
+        super().__init__(CGesturesE.F, RStatusesE.MOVE_FORWARD, vr, vl)
 
 
 class MoveBackward(Move):
 
-    def __init__(self, distance):
-        super().__init__(CGesturesE.F, RStatusesE.MOVE_BACKWARD, translation=[-distance, 0, 0])
+    def __init__(self, vr=-0.2, vl=-0.2):
+        super().__init__(CGesturesE.F, RStatusesE.MOVE_BACKWARD, vr, vl)
+
+
+class Stop(Move):
+
+    def __init__(self, vr=0.0, vl=0.0):
+        super().__init__(CGesturesE.F, RStatusesE.STOP, vr, vl)
 
 
 
 class Robot:
 
-    def __init__(self, status: RStatusesE=RStatusesE.STOP, position: Any=None, rotation: float = 0.0):
+    def __init__(self, robot_id, status: RStatusesE=RStatusesE.STOP, pose = None, b = 0.3, r = 0.05):
+        self._robot_id = robot_id
         self._status = status
-        if position is None:
-            position = np.array([0.0, 0.0, 0.0])
-        self._position = position
-        self._rotation = rotation
+        if pose is None:
+            pose = np.array([0.0, 0.0, 0.0])
+        self._pose = pose
+        self._b = b
+        self._r = r
+        self._trajectory = np.array([pose])
+
+    @property
+    def b(self):
+        return self._b
+
+    @b.setter
+    def b(self, new_b):
+        self._b = new_b
+
+    @property
+    def r(self):
+        return self._r
+
+    @r.setter
+    def r(self, new_r):
+        self._r = new_r
 
     @property
     def status(self):
@@ -178,20 +201,42 @@ class Robot:
         self._status = new_status
 
     @property
-    def position(self):
-        return self._position
+    def pose(self):
+        return self._pose
 
-    @position.setter
-    def position(self, new_position):
-        self._position = new_position
+    @pose.setter
+    def pose(self, new_pose):
+        self._pose = new_pose
 
     @property
-    def rotation(self):
-        return self._rotation
+    def trajectory(self):
+        return self._trajectory
 
-    @rotation.setter
-    def rotation(self, new_rotation):
-        self._rotation = new_rotation
+    @property
+    def robot_id(self):
+        return self._robot_id
+
+    @robot_id.setter
+    def robot_id(self, new_robot_id):
+        self._robot_id = new_robot_id
+
+    def add_to_trajectory(self, point):
+        self._trajectory = np.concatenate((self.trajectory, [point]), axis=0)
+
+    def clear_trajectory(self):
+        self._trajectory = np.array([])
+
+    def show_trajectory(self):
+        plt.figure(figsize=(8, 5))
+        x = [p[0] for p in self.trajectory]
+        y = [p[1] for p in self.trajectory]
+        plt.plot(x, y, label=f'Trajectory at {self._robot_id}°')  # Use plt.plot for lines
+        plt.title('Robot Trajectory')
+        plt.xlabel('X (m)')
+        plt.ylabel('Y (m)')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
 
 
 class SimpleGestureClassifier:
@@ -315,50 +360,40 @@ def draw_landmarks(frame, hand_landmarks, top_gesture) -> str:
 if __name__ == "__main__":
     main()
 
-def test_move():
-    robot1 = Robot(RStatusesE.STOP, np.array([10, 15, 0]))
-    mv1 = Move('F', RStatusesE.MOVE_FORWARD, 'z', 45, np.array([1, 1, 0]))
-    mv1.execute(robot1)
-    print(f"Robot status after execution: {robot1.status.value}, robot position: {robot1.position}, robot rotation around z: {robot1.rotation}")
+@pytest.mark.parametrize("cmd_cls", [
+    TurnLeft,
+    TurnRight,
+    MoveForward,
+    MoveBackward
+])
+def test_cmd(cmd_cls: Any):
+    robot1 = Robot('robot1', RStatusesE.STOP, np.array([10, 15, 0]))
+    for _ in range(100):
+        cmd = cmd_cls()
+        cmd.execute(robot1)
+    robot1.show_trajectory()
+    print(f"Robot status after execution: {robot1.status.value}, robot pose: {robot1.pose}")
 
-def test_turn_left():
-    robot1 = Robot(RStatusesE.STOP, np.array([10, 15, 0]))
-    tl =  TurnLeft(10)
-    tl.execute(robot1)
-    print(
-        f"Robot status after execution: {robot1.status.value}, robot position: {robot1.position}, robot rotation around z: {robot1.rotation}")
-
-def test_turn_right():
-    robot1 = Robot(RStatusesE.STOP, np.array([10, 15, 0]))
-    tr =  TurnRight(10)
-    tr.execute(robot1)
-    print(
-        f"Robot status after execution: {robot1.status.value}, robot position: {robot1.position}, robot rotation around z: {robot1.rotation}")
-
-def test_move_forward():
-    robot1 = Robot(RStatusesE.STOP, np.array([10, 15, 0]))
-    mf =  MoveForward(10)
-    mf.execute(robot1)
-    print(
-        f"Robot status after execution: {robot1.status.value}, robot position: {robot1.position}, robot rotation around z: {robot1.rotation}")
-
-def test_move_backward():
-    robot1 = Robot(RStatusesE.STOP, np.array([10, 15, 0]))
-    mb =  MoveBackward(10)
-    mb.execute(robot1)
-    print(
-        f"Robot status after execution: {robot1.status.value}, robot position: {robot1.position}, robot rotation around z: {robot1.rotation}")
-
-
-def test_tl_mf_tr_mb():
-    robot1 = Robot(RStatusesE.STOP, np.array([10, 15, 0]))
-    tl = TurnLeft(10)
-    tl.execute(robot1)
-    mf = MoveForward(10)
-    mf.execute(robot1)
-    tr = TurnRight(10)
-    tr.execute(robot1)
-    mb = MoveBackward(10)
-    mb.execute(robot1)
-    print(
-        f"Robot status after execution: {robot1.status.value}, robot position: {robot1.position}, robot rotation around z: {robot1.rotation}")
+def test_drive():
+    robot1 = Robot('robot1', RStatusesE.STOP, np.array([0, 0, 0]))
+    for _ in range(100):
+        tl = TurnLeft()
+        tl.execute(robot1)
+        mf = MoveForward()
+        mf.execute(robot1)
+    st = Stop()
+    st.execute(robot1)
+    for _ in range(100):
+        tr = TurnRight()
+        tr.execute(robot1)
+        mf = MoveForward()
+        mf.execute(robot1)
+    st = Stop()
+    st.execute(robot1)
+    for _ in range(100):
+        tl = TurnLeft()
+        tl.execute(robot1)
+        mb = MoveBackward()
+        mb.execute(robot1)
+    print(f"Robot status after execution: {robot1.status.value}, robot pose: {robot1.pose}")
+    robot1.show_trajectory()
