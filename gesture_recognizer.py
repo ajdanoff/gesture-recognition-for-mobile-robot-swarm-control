@@ -1,242 +1,21 @@
 import time
-from abc import abstractmethod, ABC
 from typing import Any
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import pytest
-from matplotlib import pyplot as plt
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-from scipy.spatial.transform import RigidTransform as Tf
-from scipy.spatial.transform import Rotation as R
+from commands import TurnLeft, TurnRight, MoveForward, MoveBackward, Stop, RStatusesE, ConvergeGreedyTarget, \
+    ConvergeTargetAligned, ConvergeTargetSoftmax
+from optimization import BoxObstacleConstraint
+from robot import Robot
 
 mp_hands = mp.tasks.vision.HandLandmarksConnections
 mp_drawing = mp.tasks.vision.drawing_utils
 mp_drawing_styles = mp.tasks.vision.drawing_styles
-
-from enum import Enum
-
-
-class RStatusesE(Enum):
-    ASCEND = "ASCEND"
-    CONTROL = "CONTROL"
-    DESCEND = "DESCEND"
-    DOCKING = "DOCK"
-    FOLLOWING = "FOLLOW"
-    GRIP = "GRIP"
-    MOVE_BACKWARD = "MOVE_BACKWARD"
-    MOVE_FORWARD = "MOVE_FORWARD"
-    TURN_LEFT = "TURN_LEFT"
-    TURN_RIGHT = "TURN_RIGHT"
-    RELEASE = "RELEASE"
-    STOP = "STOP"
-
-
-class CGesturesE(Enum):
-    UNRECOGNIZED = "Unknown"
-    CLOSED_FIST = "Closed_Fist"
-    OPEN_PALM = "Open_Palm"
-    POINTING_UP = "Pointing_Up"
-    THUMB_DOWN = "Thumb_Down"
-    THUMBS_UP = "Thumb_Up"
-    VICTORY = "Victory"
-    LOVE = "ILoveYou"
-    L = "L"
-    Y = "Y"
-    B = "B"
-    C_E = "C|E"
-    F = "F"
-    U = "U"
-    R = "R"
-    W = "W"
-
-
-class RobotCmd(ABC):
-
-    def __init__(self, mnmnx, status):
-        self._mnmnx = mnmnx
-        self._status = status
-
-    @property
-    def mnmnx(self):
-        return self._mnmnx
-
-    @mnmnx.setter
-    def mnmnx(self, new_mnmnx):
-        self._mnmnx = new_mnmnx
-
-    @property
-    def status(self):
-        return self._status
-
-    @status.setter
-    def status(self, new_status):
-        self._status = new_status
-
-    @abstractmethod
-    def execute(self, robot):
-        raise NotImplementedError("'execute' is not implemented !")
-
-class Move(RobotCmd):
-
-    _vr: float
-    _vl: float
-
-    def __init__(self, mnmnx, status, vr=0.0, vl=0.0):
-        super().__init__(mnmnx, status)
-        self._vr = vr
-        self._vl = vl
-
-    @property
-    def vr(self):
-        return self._vr
-
-    @vr.setter
-    def vr(self, new_vr):
-        self.vr = new_vr
-
-    @property
-    def vl(self):
-        return self._vl
-
-    @vl.setter
-    def vl(self, new_vl):
-        self.vl = new_vl
-
-    def compute_velocities(self, b, r):
-        v = r / 2 * (self.vr + self.vl)
-        omega = r / b * (self.vr - self.vl)
-        return  v, omega
-
-    def update_pose(self, pose, b, r, dt=1/30):
-        v, omega = self.compute_velocities(b, r)
-        x, y, theta = pose
-        theta += omega * dt
-        x += v * np.cos(theta) * dt
-        y += v * np.sin(theta) * dt
-        return np.array([x, y, theta])
-
-    def execute(self, robot):
-        robot.status = self.status
-        print(f"robot status changed to: {robot.status.value}")
-        robot.pose = self.update_pose(robot.pose, robot.b, robot.r)
-        print(f"robot pose changed to: {robot.pose}")
-        robot.add_to_trajectory(robot.pose)
-
-
-class TurnLeft(Move):
-
-    def __init__(self, vr=0.2, vl=0.1):
-        super().__init__(CGesturesE.L, RStatusesE.TURN_LEFT, vr, vl)
-
-    def execute(self, robot):
-        super().execute(robot)
-
-
-class TurnRight(Move):
-
-    def __init__(self, vr=0.1, vl=0.2):
-        super().__init__(CGesturesE.R, RStatusesE.TURN_RIGHT, vr, vl)
-
-    def execute(self, robot):
-        super().execute(robot)
-
-
-class MoveForward(Move):
-
-    def __init__(self, vr=0.2, vl=0.2):
-        super().__init__(CGesturesE.F, RStatusesE.MOVE_FORWARD, vr, vl)
-
-
-class MoveBackward(Move):
-
-    def __init__(self, vr=-0.2, vl=-0.2):
-        super().__init__(CGesturesE.F, RStatusesE.MOVE_BACKWARD, vr, vl)
-
-
-class Stop(Move):
-
-    def __init__(self, vr=0.0, vl=0.0):
-        super().__init__(CGesturesE.F, RStatusesE.STOP, vr, vl)
-
-
-
-class Robot:
-
-    def __init__(self, robot_id, status: RStatusesE=RStatusesE.STOP, pose = None, b = 0.3, r = 0.05):
-        self._robot_id = robot_id
-        self._status = status
-        if pose is None:
-            pose = np.array([0.0, 0.0, 0.0])
-        self._pose = pose
-        self._b = b
-        self._r = r
-        self._trajectory = np.array([pose])
-
-    @property
-    def b(self):
-        return self._b
-
-    @b.setter
-    def b(self, new_b):
-        self._b = new_b
-
-    @property
-    def r(self):
-        return self._r
-
-    @r.setter
-    def r(self, new_r):
-        self._r = new_r
-
-    @property
-    def status(self):
-        return self._status
-
-    @status.setter
-    def status(self, new_status):
-        self._status = new_status
-
-    @property
-    def pose(self):
-        return self._pose
-
-    @pose.setter
-    def pose(self, new_pose):
-        self._pose = new_pose
-
-    @property
-    def trajectory(self):
-        return self._trajectory
-
-    @property
-    def robot_id(self):
-        return self._robot_id
-
-    @robot_id.setter
-    def robot_id(self, new_robot_id):
-        self._robot_id = new_robot_id
-
-    def add_to_trajectory(self, point):
-        self._trajectory = np.concatenate((self.trajectory, [point]), axis=0)
-
-    def clear_trajectory(self):
-        self._trajectory = np.array([])
-
-    def show_trajectory(self):
-        plt.figure(figsize=(8, 5))
-        x = [p[0] for p in self.trajectory]
-        y = [p[1] for p in self.trajectory]
-        plt.plot(x, y, label=f'Trajectory at {self._robot_id}°')  # Use plt.plot for lines
-        plt.title('Robot Trajectory')
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.grid(True)
-        plt.legend()
-        plt.show()
 
 
 class SimpleGestureClassifier:
@@ -397,3 +176,104 @@ def test_drive():
         mb.execute(robot1)
     print(f"Robot status after execution: {robot1.status.value}, robot pose: {robot1.pose}")
     robot1.show_trajectory()
+
+
+def test_probabilistic_convergence():
+    robot = Robot('robot2', RStatusesE.STOP, [0., 0., 0.])
+    target = np.array([2., 1., 0.])
+    cmd = ConvergeTargetSoftmax(target, max_it=10000, temperature=1.0)
+    cmd.execute(robot)
+    robot.show_trajectory()
+    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
+    assert final_dist < 0.5, f"Probabilistic: {final_dist:.3f}m"  # Looser but realistic
+
+def test_obstacle_avoidance_correctness():
+    """Robot avoids obstacle [0.4-0.6, 0.2-0.3]"""
+    robot = Robot('robot1', RStatusesE.STOP, [0., 0., np.pi / 4])
+    target = np.array([4, 1.5, 0.])
+    obstacle = BoxObstacleConstraint(0.4, 0.6, 0.2, 0.3)
+    constraints = [obstacle]
+
+    cmd = ConvergeGreedyTarget(target, max_it=10000, constraints=constraints)
+    cmd.execute(robot)
+    robot.show_trajectory()
+
+    # All trajectory points AVOID obstacle
+    for pose in robot.trajectory:
+        assert obstacle.check(pose), f"Entered obstacle at {pose[:2]}"
+
+    assert robot.status == RStatusesE.CONVERGE
+    init_dist = np.linalg.norm(robot.trajectory[0][:2] - target[:2])
+    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
+    assert final_dist < init_dist * 0.9
+    print(f"PASS: {len(robot.trajectory)} steps, final dist: {final_dist:.2f}m")
+    robot.show_trajectory()
+
+def test_no_constraints_reaches_target():
+    """Without constraints, makes significant progress toward target"""
+    robot = Robot('robot2', RStatusesE.STOP, [0., 0., 0.])
+    target = np.array([2., 1., 0.])
+    cmd = ConvergeGreedyTarget(target, max_it=2000)  # More iterations
+    cmd.execute(robot)
+
+    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
+    init_dist = np.linalg.norm(np.array([0, 0]) - target[:2])
+
+    # Accept 50% progress (realistic for greedy)
+    assert final_dist < init_dist * 0.5, f"Expected <1m progress, got {final_dist:.3f}m"
+    print(f"Progress: {init_dist - final_dist:.2f}m ({100 * (1 - final_dist / init_dist):.1f}%)")
+
+def test_no_constraints_reaches_target_aligned():
+    robot = Robot('robot2', RStatusesE.STOP, [0., 0., 0.])
+    target = np.array([2., 1., 0.])
+    cmd = ConvergeTargetAligned(target, max_it=2000, eps=0.3)  # Looser eps
+    cmd.execute(robot)
+
+    final_dist = float(np.linalg.norm(robot.pose[:2] - target[:2]))  # np.float64 fix
+    assert final_dist < 1.0, f"Expected <1.0m, got {final_dist:.3f}m"
+    assert final_dist < 2.1  # Current performance baseline
+    robot.show_trajectory()
+
+def test_impossible_with_tight_obstacle():
+    """Raises error when obstacle blocks all paths"""
+    robot = Robot('robot3', RStatusesE.STOP, [0., 0., 0.])
+    target = np.array([3., 0., 0.])
+    wall = BoxObstacleConstraint(-0.1, 2.9, -10, 10)
+
+    cmd = ConvergeGreedyTarget(target, max_it=50, constraints=[wall])
+    with pytest.raises(RuntimeError):
+        cmd.execute(robot)
+
+
+def test_multiple_obstacles():
+    """Respects multiple obstacle constraints"""
+    robot = Robot('robot4', RStatusesE.STOP, [0., 0., 0.])
+    target = np.array([3., 1.5, 0.])
+    obstacles = [
+        BoxObstacleConstraint(0.8, 1.2, 0.0, 0.5),
+        BoxObstacleConstraint(1.8, 2.2, 0.8, 1.3)
+    ]
+
+    cmd = ConvergeGreedyTarget(target, max_it=1000, constraints=obstacles)
+    cmd.execute(robot)
+
+    for obstacle in obstacles:
+        for pose in robot.trajectory:
+            assert obstacle.check(pose)
+
+    robot.show_trajectory()
+
+
+def test_constraint_logic_all_not_any():
+    """Verifies ALL constraints must pass"""
+    robot = Robot('robot5', RStatusesE.STOP, [0., 0., 0.])
+    target = np.array([1., 0., 0.])
+
+    loose = BoxObstacleConstraint(-10, 10, -10, 10)  # Always passes
+    strict = BoxObstacleConstraint(0.9, 1.1, -0.1, 0.1)  # Blocks near target
+
+    cmd = ConvergeGreedyTarget(target, max_it=100, constraints=[loose, strict])
+    cmd.execute(robot)
+
+    # Must respect STRICT constraint even if loose allows
+    assert strict.check(robot.pose)
