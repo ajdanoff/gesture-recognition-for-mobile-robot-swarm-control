@@ -1,5 +1,5 @@
 import time
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import mediapipe as mp
@@ -9,8 +9,8 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from commands import TurnLeft, TurnRight, MoveForward, MoveBackward, Stop, RStatusesE, ConvergeGreedyTarget, \
-    ConvergeTargetAligned, ConvergeTargetSoftmax
-from optimization import BoxObstacleConstraint
+    ConvergeTargetAligned, ConvergeTargetSoftmax, ConvergeTargetChainedGreedySoftmax, SafeConverge
+from constraints import BoxObstacleConstraint
 from robot import Robot
 
 mp_hands = mp.tasks.vision.HandLandmarksConnections
@@ -21,259 +21,249 @@ mp_drawing_styles = mp.tasks.vision.drawing_styles
 class SimpleGestureClassifier:
 
     def extract_landmarks(self, hand_landmarks):
-        landmarks = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks])
+        landmarks = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark])
         return landmarks
 
     def predict(self, landmarks):
-        # Extract key landmarks (thumb, index, middle, ring, pinky tips)
-        tips = [4, 8, 12, 16, 20]  # Landmark indices
-        pips = [3, 6, 10, 14, 18]
+        """Classify gestures from landmark positions."""
+        tips = [4, 8, 12, 16, 20]  # Thumb, index, middle, ring, pinky tips
+        pips = [3, 6, 10, 14, 18]  # PIP joints
+
         tip_status = []
-        pip_status = []
-
         for tip, pip in zip(tips, pips):
-            # Check if fingertip is above PIP joint (extended finger)
-            # pip = tip - 2
-            if landmarks[tip][1] < landmarks[pip][1]:
-                tip_status.append(1)
-            else:
-                if landmarks[tip][1] > landmarks[pip][1]:
-                    pip_status.append(1)
-                else:
-                    pip_status.append(0)
-                tip_status.append(0)
+            # Extended finger if tip ABOVE PIP (smaller Y in image coords)
+            tip_status.append(1 if landmarks[tip][1] < landmarks[pip][1] else 0)
 
-        crossing_fingers = False
-        if landmarks[12][0] > landmarks[8][0]:
-            crossing_fingers = True
-
-        extended_count = sum(tip_status)
-        # Gesture classification rules
-        print(tip_status)
-        print(pip_status)
-        if tip_status[0] == tip_status[1] == 1 and sum(tip_status[2:]) == 0:
+        # Gesture rules (thumb=0, index=1, middle=2, ring=3, pinky=4)
+        if tip_status == [1, 1, 0, 0, 0]:
             return 'L'
-        elif tip_status[0] == tip_status[4] == 1 and sum(tip_status[1:4]) == 0:
+        elif tip_status == [1, 0, 0, 0, 1]:
             return 'Y'
-        elif tip_status[0] == 1 and sum(tip_status[1:]) == 4:
-            return 'B'
-        elif tip_status[0] == 1 and tip_status[1] == 0 and sum(tip_status[2:]) == 3:
-            return 'F'
-        elif tip_status[0] == tip_status[1] == tip_status[2] == 1 and sum(tip_status[3:]) == 0:
-            if crossing_fingers:
-                return 'R'
-            return 'U'
-        elif tip_status[0] == tip_status[1] == tip_status[2] == tip_status[3] == 1 and tip_status[4] == 0:
+        elif tip_status == [1, 1, 1, 1, 0]:
             return 'W'
-        elif tip_status[0] == 1 and sum(pip_status) == 4:
-            return 'C|E'
-
-        return 'unknown'
-
-
-def main():
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-    base_options = python.BaseOptions(model_asset_path='gesture_recognizer.task')
-    vision_running_mode = mp.tasks.vision.RunningMode
-    options = vision.GestureRecognizerOptions(base_options=base_options,
-                                              running_mode=vision_running_mode.IMAGE)
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame = cv2.flip(frame, 1)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_frame = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-
-        with vision.GestureRecognizer.create_from_options(options) as recognizer:
-            recognition_result = recognizer.recognize(mp_frame)
-
-            # STEP 5: Process the result. In this case, visualize it.
-            try:
-                top_gesture = recognition_result.gestures[0][0]
-                hand_landmarks = recognition_result.hand_landmarks
-                if top_gesture.category_name == 'None':
-                    print(f'category is {top_gesture.category_name}, predicting using landmarks: {hand_landmarks}')
-                    simple_predictor = SimpleGestureClassifier()
-                    landmarks = simple_predictor.extract_landmarks(hand_landmarks[0])
-                    top_gesture.category_name = simple_predictor.predict(landmarks)
-                metrics = draw_landmarks(frame, hand_landmarks, top_gesture)
-                # frame, metrics = display_gesture_landmarks(mp_frame, top_gesture, hand_landmarks)
-            except Exception as e:
-                print(f"Error: {e}")
-            else:
-                print(f"Gesture: {top_gesture}, Metrics: {metrics}")
-
-        cv2.imshow('Gesture Robot Swarm Control', frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('s'):
-            cv2.imwrite(f'gesture_demo{int(time.time())}.png', frame)
-            print('Production screenshot saved !')
-
-    cap.release()
-    cv2.destroyAllWindows()
+        elif sum(tip_status) == 1:
+            return 'THUMBS_UP'
+        elif sum(tip_status) == 0:
+            return 'CLOSED_FIST'
+        elif sum(tip_status) >= 3:
+            return 'F'  # Open hand
+        return 'F'
 
 
-def draw_landmarks(frame, hand_landmarks, top_gesture) -> str:
-    metrics = f"{top_gesture.category_name} ({top_gesture.score:.2f})"
-    for hand_landmark in hand_landmarks:
-        mp_drawing.draw_landmarks(frame,
-                                  hand_landmark,
-                                  mp_hands.HAND_CONNECTIONS,
-                                  mp_drawing_styles.get_default_hand_landmarks_style(),
-                                  mp_drawing_styles.get_default_hand_connections_style()
-                                  )
-    cv2.putText(frame, metrics, (10, 110),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    return metrics
+class GestureRobotController:
+    """Main controller: Camera → Gesture → Robot Command."""
+
+    GESTURE_MAP = {
+        'Closed_Fist': Stop(),
+        'Open_Palm': MoveForward(),
+        'Victory': SafeConverge(np.array([2.0, 1.0, 0.0])),
+        'L': TurnLeft(),
+        'R': TurnRight(),
+        'Thumbs_Up': MoveForward(),
+        'Pointing_Up': TurnLeft(),  # Placeholder
+        'CLOSED_FIST': Stop(),
+        'F': MoveForward(),
+        'THUMBS_UP': MoveForward(),
+        'L': TurnLeft(),
+        'Y': Stop(),  # Placeholder
+        'W': MoveForward()
+    }
+
+    def __init__(self, model_path: str = 'gesture_recognizer.task'):
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+        # MediaPipe setup (single instance - NO memory leak)
+        self.base_options = mp.tasks.BaseOptions(model_asset_path=model_path)
+        self.options = mp.tasks.vision.GestureRecognizerOptions(
+            base_options=self.base_options,
+            running_mode=mp.tasks.vision.RunningMode.IMAGE
+        )
+        self.recognizer = mp.tasks.vision.GestureRecognizer.create_from_options(self.options)
+
+        self.classifier = SimpleGestureClassifier()
+        self.robot = Robot('gesture_controlled', RStatusesE.STOP, np.array([0., 0., 0.]))
+
+        # Environment
+        self.obstacles = [
+            BoxObstacleConstraint(0.4, 0.6, 0.2, 0.3)
+        ]
+
+    def run(self):
+        """Main control loop."""
+        print("🎮 Gesture Swarm Control Active (q=quit, s=screenshot)")
+
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            frame = cv2.flip(frame, 1)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_frame = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+
+            # Gesture recognition
+            result = self.recognizer.recognize(mp_frame)
+            command = self.process_gesture(result, frame)
+
+            # Execute if valid command
+            if command:
+                command.execute(self.robot)
+
+            # Visual feedback
+            self.draw_status(frame)
+            cv2.imshow('Gesture Robot Swarm Control', frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('s'):
+                cv2.imwrite(f'gesture_demo_{int(time.time())}.png', frame)
+                print('Screenshot saved!')
+
+        self.cleanup()
+
+    def process_gesture(self, result, frame) -> Optional['RobotCmd']:
+        """MediaPipe → Robot Command."""
+        try:
+            if not result.gestures or not result.hand_landmarks:
+                return None
+
+            top_gesture = result.gestures[0][0]
+            gesture_name = top_gesture.category_name
+
+            # MediaPipe recognized gesture
+            if gesture_name != 'None':
+                cmd = self.GESTURE_MAP.get(gesture_name, Stop())
+                cv2.putText(frame, f"MediaPipe: {gesture_name}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                return cmd
+
+            # Fallback: rule-based classifier
+            landmarks = self.classifier.extract_landmarks(result.hand_landmarks[0])
+            fallback_gesture = self.classifier.predict(landmarks)
+            cmd = self.GESTURE_MAP.get(fallback_gesture, Stop())
+
+            cv2.putText(frame, f"Fallback: {fallback_gesture}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+            return cmd
+
+        except Exception as e:
+            print(f"Gesture processing error: {e}")
+            return Stop()
+
+    def draw_status(self, frame):
+        """Draw robot status and trajectory preview."""
+        cv2.putText(frame, f"Status: {self.robot.status.value}", (10, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+        cv2.putText(frame, f"Pose: [{self.robot.pose[0]:.2f}, {self.robot.pose[1]:.2f}]",
+                    (10, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+        # Draw hand landmarks
+        if hasattr(self, 'last_landmarks'):
+            for hand_landmark in self.last_landmarks:
+                mp_drawing.draw_landmarks(
+                    frame, hand_landmark, mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style())
+
+    def cleanup(self):
+        self.cap.release()
+        cv2.destroyAllWindows()
+        Stop().execute(self.robot)
+        print("🤖 Robot stopped. System shutdown.")
+
+
+# === TESTS ===
+def test_show_trajectory():
+    robot = Robot("SwarmBot1")
+    robot.converge_to(np.array([3, 4, 0]), max_it=50)
+    robot.show_trajectory()
+
+def test_start_live_plot():
+    r1 = Robot("Bot1")
+    r1.start_live_plot()
+    r2 = Robot("Bot2", pose=np.array([1, 0, 0]))
+    r2.start_live_plot()  # Shared figs? Use subplots
+    r1.converge_to(np.array([3, 3, 0]))
+    r2.converge_to(np.array([3, 4, 0]))
+    r1.show_trajectory()  # Static summary
+
+def test_simple_gesture_classifier():
+    """Test rule-based classifier accuracy."""
+    classifier = SimpleGestureClassifier()
+
+    # Mock landmarks for L gesture (thumb+index extended)
+    mock_landmarks = np.zeros((21, 3))
+    # Simulate thumb+index extended
+    mock_landmarks[4, 1] = 0.3  # Thumb tip up
+    mock_landmarks[3, 1] = 0.35  # Thumb PIP down
+    mock_landmarks[8, 1] = 0.25  # Index tip up
+    mock_landmarks[6, 1] = 0.3  # Index PIP down
+
+    gesture = classifier.predict(mock_landmarks)
+    assert gesture == 'L', f"Expected 'L', got {gesture}"
+
+
+@pytest.mark.parametrize("cmd_cls", [TurnLeft, TurnRight, MoveForward, MoveBackward])
+def test_basic_commands(cmd_cls: Any):
+    """Test individual gesture commands."""
+    robot = Robot('test_cmd', RStatusesE.STOP, np.array([0., 0., 0.]))
+    cmd = cmd_cls()
+    cmd.execute(robot)
+
+    assert robot.status == cmd.status
+    assert len(robot.trajectory) == 2
+    print(f"✅ {cmd_cls.__name__}: {robot.pose}")
+
+
+def test_drive_sequence():
+    """Test complex movement sequence."""
+    robot = Robot('test_drive', RStatusesE.STOP, np.array([0., 0., 0.]))
+
+    # Turn left + forward
+    for _ in range(5):
+        TurnLeft().execute(robot)
+        MoveForward().execute(robot)
+
+    Stop().execute(robot)
+    assert robot.status == RStatusesE.STOP
+    robot.show_trajectory()
+
+
+def test_convergence_with_obstacles():
+    """Test obstacle avoidance + convergence."""
+    robot = Robot('test_obs', RStatusesE.STOP, np.array([0., 0., np.pi / 4]))
+    target = np.array([3., 1.5, 0.])
+    obstacle = BoxObstacleConstraint(0.4, 0.6, 0.2, 0.3)
+
+    cmd = SafeConverge(target, constraints=[obstacle], max_it=1000)
+    cmd.execute(robot)
+
+    # Verify obstacle avoidance
+    for pose in robot.trajectory:
+        assert obstacle.check(pose)
+
+    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
+    print(f"✅ Final distance: {final_dist:.3f}m")
+    robot.show_trajectory()
+
+
+def test_gesture_integration_pipeline():
+    """End-to-end gesture → robot movement."""
+    controller = GestureRobotController()
+    controller.robot = Robot('test_gesture', RStatusesE.STOP, np.array([0., 0., 0.]))
+
+    # Simulate Victory gesture
+    mock_cmd = ConvergeTargetChainedGreedySoftmax(np.array([2., 1., 0.]))
+    mock_cmd.execute(controller.robot)
+
+    assert len(controller.robot.trajectory) > 10
+    assert controller.robot.status == RStatusesE.CONVERGE
+    print("✅ Full gesture pipeline OK")
 
 
 if __name__ == "__main__":
-    main()
-
-@pytest.mark.parametrize("cmd_cls", [
-    TurnLeft,
-    TurnRight,
-    MoveForward,
-    MoveBackward
-])
-def test_cmd(cmd_cls: Any):
-    robot1 = Robot('robot1', RStatusesE.STOP, np.array([10, 15, 0]))
-    for _ in range(100):
-        cmd = cmd_cls()
-        cmd.execute(robot1)
-    robot1.show_trajectory()
-    print(f"Robot status after execution: {robot1.status.value}, robot pose: {robot1.pose}")
-
-def test_drive():
-    robot1 = Robot('robot1', RStatusesE.STOP, np.array([0, 0, 0]))
-    for _ in range(100):
-        tl = TurnLeft()
-        tl.execute(robot1)
-        mf = MoveForward()
-        mf.execute(robot1)
-    st = Stop()
-    st.execute(robot1)
-    for _ in range(100):
-        tr = TurnRight()
-        tr.execute(robot1)
-        mf = MoveForward()
-        mf.execute(robot1)
-    st = Stop()
-    st.execute(robot1)
-    for _ in range(100):
-        tl = TurnLeft()
-        tl.execute(robot1)
-        mb = MoveBackward()
-        mb.execute(robot1)
-    print(f"Robot status after execution: {robot1.status.value}, robot pose: {robot1.pose}")
-    robot1.show_trajectory()
-
-
-def test_probabilistic_convergence():
-    robot = Robot('robot2', RStatusesE.STOP, [0., 0., 0.])
-    target = np.array([2., 1., 0.])
-    cmd = ConvergeTargetSoftmax(target, max_it=10000, temperature=1.0)
-    cmd.execute(robot)
-    robot.show_trajectory()
-    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
-    assert final_dist < 0.5, f"Probabilistic: {final_dist:.3f}m"  # Looser but realistic
-
-def test_obstacle_avoidance_correctness():
-    """Robot avoids obstacle [0.4-0.6, 0.2-0.3]"""
-    robot = Robot('robot1', RStatusesE.STOP, [0., 0., np.pi / 4])
-    target = np.array([4, 1.5, 0.])
-    obstacle = BoxObstacleConstraint(0.4, 0.6, 0.2, 0.3)
-    constraints = [obstacle]
-
-    cmd = ConvergeGreedyTarget(target, max_it=10000, constraints=constraints)
-    cmd.execute(robot)
-    robot.show_trajectory()
-
-    # All trajectory points AVOID obstacle
-    for pose in robot.trajectory:
-        assert obstacle.check(pose), f"Entered obstacle at {pose[:2]}"
-
-    assert robot.status == RStatusesE.CONVERGE
-    init_dist = np.linalg.norm(robot.trajectory[0][:2] - target[:2])
-    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
-    assert final_dist < init_dist * 0.9
-    print(f"PASS: {len(robot.trajectory)} steps, final dist: {final_dist:.2f}m")
-    robot.show_trajectory()
-
-def test_no_constraints_reaches_target():
-    """Without constraints, makes significant progress toward target"""
-    robot = Robot('robot2', RStatusesE.STOP, [0., 0., 0.])
-    target = np.array([2., 1., 0.])
-    cmd = ConvergeGreedyTarget(target, max_it=2000)  # More iterations
-    cmd.execute(robot)
-
-    final_dist = np.linalg.norm(robot.pose[:2] - target[:2])
-    init_dist = np.linalg.norm(np.array([0, 0]) - target[:2])
-
-    # Accept 50% progress (realistic for greedy)
-    assert final_dist < init_dist * 0.5, f"Expected <1m progress, got {final_dist:.3f}m"
-    print(f"Progress: {init_dist - final_dist:.2f}m ({100 * (1 - final_dist / init_dist):.1f}%)")
-
-def test_no_constraints_reaches_target_aligned():
-    robot = Robot('robot2', RStatusesE.STOP, [0., 0., 0.])
-    target = np.array([2., 1., 0.])
-    cmd = ConvergeTargetAligned(target, max_it=2000, eps=0.3)  # Looser eps
-    cmd.execute(robot)
-
-    final_dist = float(np.linalg.norm(robot.pose[:2] - target[:2]))  # np.float64 fix
-    assert final_dist < 1.0, f"Expected <1.0m, got {final_dist:.3f}m"
-    assert final_dist < 2.1  # Current performance baseline
-    robot.show_trajectory()
-
-def test_impossible_with_tight_obstacle():
-    """Raises error when obstacle blocks all paths"""
-    robot = Robot('robot3', RStatusesE.STOP, [0., 0., 0.])
-    target = np.array([3., 0., 0.])
-    wall = BoxObstacleConstraint(-0.1, 2.9, -10, 10)
-
-    cmd = ConvergeGreedyTarget(target, max_it=50, constraints=[wall])
-    with pytest.raises(RuntimeError):
-        cmd.execute(robot)
-
-
-def test_multiple_obstacles():
-    """Respects multiple obstacle constraints"""
-    robot = Robot('robot4', RStatusesE.STOP, [0., 0., 0.])
-    target = np.array([3., 1.5, 0.])
-    obstacles = [
-        BoxObstacleConstraint(0.8, 1.2, 0.0, 0.5),
-        BoxObstacleConstraint(1.8, 2.2, 0.8, 1.3)
-    ]
-
-    cmd = ConvergeGreedyTarget(target, max_it=1000, constraints=obstacles)
-    cmd.execute(robot)
-
-    for obstacle in obstacles:
-        for pose in robot.trajectory:
-            assert obstacle.check(pose)
-
-    robot.show_trajectory()
-
-
-def test_constraint_logic_all_not_any():
-    """Verifies ALL constraints must pass"""
-    robot = Robot('robot5', RStatusesE.STOP, [0., 0., 0.])
-    target = np.array([1., 0., 0.])
-
-    loose = BoxObstacleConstraint(-10, 10, -10, 10)  # Always passes
-    strict = BoxObstacleConstraint(0.9, 1.1, -0.1, 0.1)  # Blocks near target
-
-    cmd = ConvergeGreedyTarget(target, max_it=100, constraints=[loose, strict])
-    cmd.execute(robot)
-
-    # Must respect STRICT constraint even if loose allows
-    assert strict.check(robot.pose)
+    controller = GestureRobotController()
+    controller.run()

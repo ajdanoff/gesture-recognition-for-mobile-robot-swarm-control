@@ -1,12 +1,38 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
-
+from typing import List, Optional
 import numpy as np
 
-from optimization import comb_const_vel_constrained_greedy, Constraint, comb_const_vel_constrained_softmax
+
+# Enums
+class RStatusesE(Enum):
+    STOP = "STOP"
+    MOVE_FORWARD = "MOVE_FORWARD"
+    MOVE_BACKWARD = "MOVE_BACKWARD"
+    TURN_LEFT = "TURN_LEFT"
+    TURN_RIGHT = "TURN_RIGHT"
+    CONVERGE = "CONVERGE"
+
+
+class CGesturesE(Enum):
+    F = "F"
+    L = "L"
+    R = "R"
+    VICTORY = "Victory"
+
+# Forward declarations (fix circular imports)
+class Constraint: pass
+
+
+class OptimizationParameter: pass
+
+
+class Move: pass
 
 
 class RobotCmd(ABC):
+    """Abstract base for all robot commands."""
 
     def __init__(self, mnmnx, status):
         self._mnmnx = mnmnx
@@ -34,9 +60,7 @@ class RobotCmd(ABC):
 
 
 class Move(RobotCmd):
-
-    _vr: float
-    _vl: float
+    """Base movement command with differential drive kinematics."""
 
     def __init__(self, mnmnx, status, vr=0.0, vl=0.0):
         super().__init__(mnmnx, status)
@@ -49,7 +73,7 @@ class Move(RobotCmd):
 
     @vr.setter
     def vr(self, new_vr):
-        self.vr = new_vr
+        self._vr = new_vr  # ✅ FIXED: Direct assignment
 
     @property
     def vl(self):
@@ -57,14 +81,14 @@ class Move(RobotCmd):
 
     @vl.setter
     def vl(self, new_vl):
-        self.vl = new_vl
+        self._vl = new_vl  # ✅ FIXED: Direct assignment
 
     def compute_velocities(self, b, r):
         v = r / 2 * (self.vr + self.vl)
         omega = r / b * (self.vr - self.vl)
-        return  v, omega
+        return v, omega
 
-    def update_pose(self, pose, b, r, dt=1/30):
+    def update_pose(self, pose, b, r, dt=1 / 30):
         v, omega = self.compute_velocities(b, r)
         x, y, theta = pose
         theta_new = theta + omega * dt
@@ -80,269 +104,134 @@ class Move(RobotCmd):
         robot.add_to_trajectory(robot.pose)
 
 
+# Gesture Commands
 class TurnLeft(Move):
-
     def __init__(self, vr=0.2, vl=0.1):
         super().__init__(CGesturesE.L, RStatusesE.TURN_LEFT, vr, vl)
 
-    def execute(self, robot):
-        super().execute(robot)
-
 
 class TurnRight(Move):
-
     def __init__(self, vr=0.1, vl=0.2):
         super().__init__(CGesturesE.R, RStatusesE.TURN_RIGHT, vr, vl)
 
-    def execute(self, robot):
-        super().execute(robot)
-
 
 class MoveForward(Move):
-
     def __init__(self, vr=0.2, vl=0.2):
         super().__init__(CGesturesE.F, RStatusesE.MOVE_FORWARD, vr, vl)
 
 
 class MoveBackward(Move):
-
     def __init__(self, vr=-0.2, vl=-0.2):
         super().__init__(CGesturesE.F, RStatusesE.MOVE_BACKWARD, vr, vl)
 
 
 class Stop(Move):
-
     def __init__(self, vr=0.0, vl=0.0):
         super().__init__(CGesturesE.F, RStatusesE.STOP, vr, vl)
 
 
+# Optimization Commands (Dataclass version - EXCELLENT!)
+@dataclass
 class ConvergeGreedyTarget(RobotCmd):
-
-    def __init__(self,
-                 target: np.ndarray,
-                 max_vr: float = 0.3,
-                 max_vl: float = 0.3,
-                 eps: float = 10e-5,
-                 max_it: int = 1000,
-                 dt: float = 0.05,
-                 heading_weight: float = 0.5,
-                 constraints: list[Constraint] = None
-                 ):
-        super().__init__(CGesturesE.VICTORY, RStatusesE.CONVERGE)
-        self._target = target
-        self._max_it = max_it
-        self._max_vr = max_vr
-        self._max_vl = max_vl
-        self._eps = eps
-        self._dt = dt
-        self._heading_weight = heading_weight
-        self._constraints = constraints
-
-    @property
-    def constraints(self):
-        return self._constraints
-
-    @constraints.setter
-    def constraints(self, new_constraints):
-        self._constraints = new_constraints
-
-    @property
-    def heading_weight(self):
-        return self._heading_weight
-
-    @heading_weight.setter
-    def heading_weight(self, new_heading_weight):
-        self._heading_weight = new_heading_weight
-
-    @property
-    def dt(self):
-        return self._dt
-
-    @dt.setter
-    def dt(self, new_dt):
-        self._dt = new_dt
-
-    @property
-    def target(self):
-        return self._target
-
-    @target.setter
-    def target(self, new_target):
-        self._target = new_target
-
-    @property
-    def max_it(self):
-        return self._max_it
-
-    @max_it.setter
-    def max_it(self, new_maxit):
-        self._max_it = new_maxit
-
-    @property
-    def max_vr(self):
-        return self._max_vr
-
-    @max_vr.setter
-    def max_vr(self, new_max_vr):
-        self._max_vr = new_max_vr
-
-    @property
-    def max_vl(self):
-        return self._max_vl
-
-    @max_vl.setter
-    def max_vl(self, new_max_vl):
-        self._max_vl = new_max_vl
-
-    @property
-    def eps(self):
-        return self._eps
-
-    @eps.setter
-    def eps(self, new_eps):
-        self._eps = new_eps
+    target: np.ndarray
+    max_vr: float = 0.3
+    max_vl: float = 0.3
+    eps: float = 10e-5
+    max_it: int = 1000
+    dt: float = 0.05
+    heading_weight: float = 0.5
+    constraints: Optional[List[Constraint]] = None
+    ngrid: int = 9
+    mnmnx = CGesturesE.VICTORY  # ✅ Fixed for dataclass
+    status = RStatusesE.CONVERGE
 
     def execute(self, robot):
-        cmds, path, rejected = comb_const_vel_constrained_greedy(
-            robot.pose,
-            robot.b,
-            robot.r,
-            self.target,
-            self.max_vr,
-            self.max_vl,
-            self.eps,
-            self.max_it,
-            self.dt,
-            self.heading_weight,
-            self.constraints
+        from optimization import constrained_greedy, OptimizationParameter
+        param = OptimizationParameter(
+            robot.pose, robot.b, robot.r, self.target, self.max_vr, self.max_vl,
+            self.eps, self.max_it, self.dt, self.heading_weight, self.constraints
         )
+        cmds, path, rejected = constrained_greedy(param)
+        print(f"Greedy: {len(cmds)} commands, {rejected} rejected")
         for cmd in cmds:
             cmd.execute(robot)
 
 
+@dataclass
 class ConvergeTargetSoftmax(ConvergeGreedyTarget):
-
-    def __init__(self,
-                 target: np.ndarray,
-                 max_vr: float = 0.3,
-                 max_vl: float = 0.3,
-                 eps: float = 10e-5,
-                 max_it: int = 1000,
-                 dt: float = 0.05,
-                 heading_weight: float = 0.5,
-                 constraints: list[Constraint] = None,
-                 temperature: float = 1.0
-                 ):
-        super().__init__(
-            target,
-            max_vr,
-            max_vl,
-            eps,
-            max_it,
-            dt,
-            heading_weight,
-            constraints
-        )
-        self._temperature = temperature
-
-    @property
-    def temperature(self):
-        return self._temperature
-
-    @temperature.setter
-    def temperature(self, new_temperature):
-        self._temperature = new_temperature
+    ngrid: int = 15
+    temperature: float = 1.0
 
     def execute(self, robot):
-        cmds, path, rejected = comb_const_vel_constrained_softmax(
-            robot.pose,
-            robot.b,
-            robot.r,
-            self.target,
-            self.max_vr,
-            self.max_vl,
-            self.eps,
-            self.max_it,
-            self.dt,
-            self.heading_weight,
-            self.constraints
+        from optimization import constrained_softmax, OptimizationParameter
+        param = OptimizationParameter(
+            robot.pose, robot.b, robot.r, self.target, self.max_vr, self.max_vl,
+            self.eps, self.max_it, self.dt, self.heading_weight, self.constraints,
+            self.ngrid, self.temperature
         )
+        cmds, path, rejected = constrained_softmax(param)
+        print(f"Softmax: {len(cmds)} commands, {rejected} rejected")
+        for cmd in cmds:
+            cmd.execute(robot)
+
+
+@dataclass
+class ConvergeTargetChainedGreedySoftmax(ConvergeTargetSoftmax):
+    """Hybrid: Greedy → Softmax fallback when stuck."""
+
+    def execute(self, robot):
+        from optimization import chained_greedy_softmax, OptimizationParameter
+        param = OptimizationParameter(
+            robot.pose, robot.b, robot.r, self.target, self.max_vr, self.max_vl,
+            self.eps, self.max_it, self.dt, self.heading_weight, self.constraints,
+            self.ngrid, self.temperature
+        )
+        cmds, path, rejected = chained_greedy_softmax(param)
+        print(f"Chained: {len(cmds)} commands, {rejected} rejected")
         for cmd in cmds:
             cmd.execute(robot)
 
 
 class ConvergeTargetAligned(ConvergeGreedyTarget):
+    """Pure pursuit controller - direct target alignment."""
 
     def execute(self, robot):
-        # ... setup ...
-        current_pose = robot.pose
+        current_pose = robot.pose.copy()
         for it in range(self.max_it):
             if np.linalg.norm(current_pose[:2] - self.target[:2]) < self.eps:
                 break
 
-            # Direct line to target
+            # Pure pursuit
             dx = self.target[0] - current_pose[0]
             dy = self.target[1] - current_pose[1]
-            dist = np.sqrt(dx ** 2 + dy ** 2)
             desired_theta = np.arctan2(dy, dx)
+            theta_error = (desired_theta - current_pose[2] + np.pi) % (2 * np.pi) - np.pi
 
-            # Align heading + forward
-            theta_error = desired_theta - current_pose[2]
-            theta_error = (theta_error + np.pi) % (2 * np.pi) - np.pi
-
-            vr = 0.25 * (1 + 2 * theta_error)  # Right faster if left error
-            vl = 0.25 * (1 - 2 * theta_error)  # Left faster if right error
-
-            # Cap velocities
+            vr = 0.25 * (1 + 2 * theta_error)
+            vl = 0.25 * (1 - 2 * theta_error)
             vr = np.clip(vr, -self.max_vr, self.max_vr)
             vl = np.clip(vl, -self.max_vl, self.max_vl)
 
             cmd = Move(CGesturesE.VICTORY, RStatusesE.CONVERGE, vr, vl)
-            cand_pose = cmd.update_pose(current_pose, robot.b, robot.r)
+            cand_pose = cmd.update_pose(current_pose, robot.b, robot.r, self.dt)
 
-            # Constraints check...
+            # Safety check
             if self.constraints and not all(c.check(cand_pose) for c in self.constraints):
-                vr = vl = 0  # Stop if unsafe
-            else:
-                cmd.execute(robot)
-                #current_pose = cand_pose
-                #robot.trajectory.append(current_pose.copy())
+                Stop().execute(robot)
+                break
 
-        robot.pose = current_pose
+            cmd.execute(robot)
+            current_pose = robot.pose
+
         robot.status = RStatusesE.CONVERGE
 
 
+class SafeConverge(ConvergeTargetChainedGreedySoftmax):
+    """Fail-safe convergence with emergency stop."""
 
-class RStatusesE(Enum):
-    ASCEND = "ASCEND"
-    CONTROL = "CONTROL"
-    CONVERGE = "CONVERGE"
-    DESCEND = "DESCEND"
-    DOCKING = "DOCK"
-    FOLLOWING = "FOLLOW"
-    GRIP = "GRIP"
-    MOVE_BACKWARD = "MOVE_BACKWARD"
-    MOVE_FORWARD = "MOVE_FORWARD"
-    TURN_LEFT = "TURN_LEFT"
-    TURN_RIGHT = "TURN_RIGHT"
-    RELEASE = "RELEASE"
-    STOP = "STOP"
-
-
-class CGesturesE(Enum):
-    UNRECOGNIZED = "Unknown"
-    CLOSED_FIST = "Closed_Fist"
-    OPEN_PALM = "Open_Palm"
-    POINTING_UP = "Pointing_Up"
-    THUMB_DOWN = "Thumb_Down"
-    THUMBS_UP = "Thumb_Up"
-    VICTORY = "Victory"
-    LOVE = "ILoveYou"
-    L = "L"
-    Y = "Y"
-    B = "B"
-    C_E = "C|E"
-    F = "F"
-    U = "U"
-    R = "R"
-    W = "W"
+    def execute(self, robot):
+        try:
+            super().execute(robot)
+        except Exception as e:
+            Stop().execute(robot)
+            print(f"🚨 Safety stop: {e}")
